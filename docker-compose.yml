@@ -1,0 +1,56 @@
+services:
+  app:
+    build:
+      context: ./smf-api
+      dockerfile: ../docker/php/Dockerfile
+    container_name: smf-api
+    restart: unless-stopped
+    volumes:
+      - ./smf-api:/var/www
+    working_dir: /var/www  
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mysql
+    networks:
+      - internal
+    command: sh -c "php artisan migrate --force && php artisan db:seed && php artisan serve --host=0.0.0.0 --port=8000"
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: smf
+      MYSQL_USER: admin
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3307:3306"
+    networks:
+      - internal
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: pma
+    restart: unless-stopped
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_USER: root
+      PMA_PASSWORD: root
+    ports:
+      - "8080:80"
+    depends_on:
+      - mysql
+    networks:
+      - internal
+
+volumes:
+  mysql_data:
+
+networks:
+  internal:
+    driver: bridge
