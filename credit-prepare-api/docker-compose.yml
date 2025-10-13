@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  credit-scoring-api:
+    build: .
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./raw_data:/app/raw_data
+      - ./processed_data:/app/processed_data
+    env_file:
+      - .env
