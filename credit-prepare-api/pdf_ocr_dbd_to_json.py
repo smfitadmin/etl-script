@@ -1,15 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-pdf_ocr_dbd_to_json_v6.py
+pdf_ocr_dbd_to_json_v6_batch.py
 
 - Extract text from PDF (prefer pdfminer; fallback Tesseract OCR)
 - Save full JSON: <name>.json
 - Save structured JSON (DBD table-aware + strong boundaries & tail-noise cleanup): <name>_structured.json
 - Merge downloads/<juristic_id>_company_title.json into structured (if present)
+- NEW: Batch mode — accept a file, a folder, or a glob pattern (e.g., downloads/*_company_info.pdf)
 
-pip install pdfminer.six pillow pytesseract pdf2image
-# macOS: brew install tesseract poppler
+Install:
+  pip install pdfminer.six pillow pytesseract pdf2image
+  # macOS: brew install tesseract poppler
+
+Usage:
+  # 1) ไฟล์เดี่ยว
+  python pdf_ocr_dbd_to_json_v6_batch.py downloads/0105541008416_company_info.pdf
+
+  # 2) ทั้งโฟลเดอร์ (จะค้นหา *_company_info.pdf)
+  python pdf_ocr_dbd_to_json_v6_batch.py downloads
+
+  # 3) ใช้ glob pattern
+  python pdf_ocr_dbd_to_json_v6_batch.py "downloads/*_company_info.pdf"
+
+  # ตัวเลือกเพิ่มเติม (ใช้ได้กับทุกโหมด)
+  --lang tha+eng --dpi 300 --force-ocr --structured-only --text-only
 """
 
 import argparse
@@ -19,6 +34,7 @@ import json
 import os
 import re
 import sys
+import glob
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional
 
@@ -105,19 +121,18 @@ class OCRResult:
 
 
 # ---------- helpers ---------- #
-# Strong boundary: next section / footer/header / noise tokens
 BOUNDARY_PAT = re.compile(
     r"(?:^|\s)(?:"
     r"ปีที่ส่งงบการเงิน\s*:|กรรมการ\s*:|คณะกรรมการลงชื่อผูกพัน\s*:|ข้อควรทราบ|"
     r"DBD\s*DataWarehouse|URL\s*:|หน้า\b|ข้อมูล\b|วันที่สั่งพิมพ์\s*:|เวลา\s*:|"
     r"\b\d{1,2}:\d{2}(?::\d{2})?\b|"         # time like 14:59 or 14:59:39
     r"\b\d{1,2}/\d{1,2}/\d{2,4}\b|"          # date like 20/10/2025
-    r"(?:บริษัท\s+.+?จำกัด)"                 # company footer bleeding in
+    r"(?:บริษัท\s+.+?จำกัด)"
     r")",
     re.U,
 )
 
-TAIL_NOISE_PAT = re.compile(r"[\d\s่-๋๊-ํ๎]+$")  # digits/space/Thai diacritics at tail
+TAIL_NOISE_PAT = re.compile(r"[\d\s่-๋๊-ํ๎]+$")
 
 
 def _norm(ln: str) -> str:
@@ -143,40 +158,30 @@ def _combine_two_line_key(lines: List[str], i: int) -> Optional[str]:
 
 
 def _cut_at_boundaries(value: str) -> str:
-    """Trim value at first boundary/time/url/date/company footer; then strip tail noise tokens."""
-    # cut at explicit boundaries
     m = BOUNDARY_PAT.search(value)
     if m:
         value = value[: m.start()]
-
-    # stop at inline numbered items (e.g., " 1.ชื่อ")
     m2 = re.search(r"\s\d+\.\s", value)
     if m2:
         value = value[: m2.start()]
-
-    # stop at inline URL
     m3 = re.search(r"https?://\S+", value)
     if m3:
         value = value[: m3.start()]
-
-    # strip trailing pure noise like "1่ ้", "2"
     value = re.sub(TAIL_NOISE_PAT, "", value)
     return value.strip(" /").strip()
 
+
 def _convert_thai_date_to_iso(date_th: str) -> Optional[str]:
-    """แปลงวันที่ไทย DD/MM/YYYY(พ.ศ.) → YYYY-MM-DD (ค.ศ.)"""
     try:
         d, m, y = map(int, date_th.split("/"))
-        if y > 2400:  # ถ้าเป็น พ.ศ.
+        if y > 2400:
             y -= 543
         return f"{y:04d}-{m:02d}-{d:02d}"
     except Exception:
         return None
 
 
-# === directors as objects (helper) ===
 def _to_director_objs(names: List[str]) -> List[Dict[str, Any]]:
-    """แปลงรายชื่อเป็น [{"no": i, "name": name}] และทำความสะอาด tail '/' + กันซ้ำ"""
     cleaned = []
     seen = set()
     for nm in names:
@@ -191,10 +196,8 @@ def _to_director_objs(names: List[str]) -> List[Dict[str, Any]]:
 
 
 def parse_structured_from_pages(pages: List[PageResult]) -> Dict[str, Any]:
-    # full text for meta & fallbacks
     full = clean_text("\n".join([p.text for p in pages]))
 
-    # meta
     company_name = _find(full, [r"ข้อมูล\s*\n\s*(บริษัท[^\n]+)", r"^\s*(บริษัท[^\n]+)"], flags=re.M)
     reg_no = _find(full, [r"เลขทะเบียนนิติบุคคล\s*:\s*([0-9\-]+)"])
     entity_type = _find(full, [r"ประเภทนิติบุคคล\s*:\s*([^\n]+)"])
@@ -210,7 +213,6 @@ def parse_structured_from_pages(pages: List[PageResult]) -> Dict[str, Any]:
     printed_time = _find(full, [r"เวลา\s*:\s*([0-9]{2}:[0-9]{2}:[0-9]{2})"])
     source_url = _find(full, [r"URL\s*:\s*(https?://\S+)"])
 
-    # lines
     lines: List[str] = []
     for p in pages:
         for ln in p.lines:
@@ -245,7 +247,6 @@ def parse_structured_from_pages(pages: List[PageResult]) -> Dict[str, Any]:
                 return k
         return _combine_two_line_key(lines, i)
 
-    # --- state machine ---
     results: Dict[str, Any] = {}
     pending: List[str] = []
     buffers: Dict[str, List[str]] = {}
@@ -264,14 +265,12 @@ def parse_structured_from_pages(pages: List[PageResult]) -> Dict[str, Any]:
                     txt = _norm(lines[j])
                     if BOUNDARY_PAT.search(txt):
                         break
-                    # เก็บเฉพาะรูปแบบ 1. ชื่อ / 2) ชื่อ
                     if re.match(r"^\d+\s*[\.\)]\s*", txt):
                         cand = re.sub(r"^\d+\s*[\.\)]\s*", "", txt).strip(" /-•.")
                         if not any(b in cand for b in ["ข้อมูล", "URL", "หน้า", "DBD", "ปีที่ส่งงบการเงิน"]):
                             local.append(cand)
                     j += 1
 
-                # doc-wide fallback (กันกรณี OCR แทรกเลขไว้ที่อื่น)
                 allnums = []
                 for x in lines:
                     t = _norm(x)
@@ -312,7 +311,6 @@ def parse_structured_from_pages(pages: List[PageResult]) -> Dict[str, Any]:
             i += 2 if k in ("หมวดธุรกิจ (มาจากงบการเงินปีล่าสุด) :", "วัตถุประสงค์ (มาจากงบการเงินปีล่าสุด) :") else 1
             continue
 
-        # content for pending keys
         txt = _norm(lines[i])
         if BOUNDARY_PAT.search(txt):
             i += 1
@@ -356,7 +354,6 @@ def parse_structured_from_pages(pages: List[PageResult]) -> Dict[str, Any]:
         if val:
             _emit(k, val)
 
-    # fallbacks
     if "financial_years" not in results:
         yrs = _find(full, [r"ปีที่ส่งงบการเงิน\s*:\s*([0-9\s,]+)"])
         results["financial_years"] = re.findall(r"[0-9]{4}", yrs or "")
@@ -395,18 +392,11 @@ def parse_structured_from_pages(pages: List[PageResult]) -> Dict[str, Any]:
         if iso:
             out["incorporation_date_th"] = iso
 
-    # ตัดคีย์ที่ค่าว่าง/None
     return {k: v for k, v in out.items() if v not in (None, "", [], {})}
 
 
-# ---------- NEW: merge company_title.json ---------- #
+# ---------- merge company_title.json ---------- #
 def merge_company_title(structured: Dict[str, Any], base_dir: str, base_pdf_stem: str) -> Dict[str, Any]:
-    """
-    รวมข้อมูลจาก <juristic_id>_company_title.json (ถ้ามี) เข้า structured:
-    - ใส่คีย์ 'title_card' = เนื้อหาในไฟล์ company_title.json ทั้งก้อน
-    - ถ้ามี 'registered_date' ใน title และ structured ยังไม่มี → คัดลอกใส่ที่ root
-    - ถ้า structured['address'] ว่าง และ title มี 'head_office_address' → เติม address ให้
-    """
     juristic_id = structured.get("registration_number") or base_pdf_stem.split("_")[0]
     title_path = os.path.join(base_dir, f"{juristic_id}_company_title.json")
     if not os.path.isfile(title_path):
@@ -429,61 +419,110 @@ def merge_company_title(structured: Dict[str, Any], base_dir: str, base_pdf_stem
     return structured
 
 
+# ---------- per-file processing ---------- #
+def process_one(pdf_path: str, args) -> bool:
+    try:
+        if not os.path.isfile(pdf_path):
+            print(f"❌ File not found: {pdf_path}", file=sys.stderr)
+            return False
+
+        base_dir = os.path.dirname(pdf_path)
+        base = os.path.splitext(os.path.basename(pdf_path))[0]
+        json_full = os.path.join(base_dir, base + ".json")
+        json_struct = os.path.join(base_dir, base + "_structured.json")
+
+        pages_text = [] if args.force_ocr else extract_text_pdfminer(pdf_path)
+        engine = "pdfminer" if pages_text else "tesseract-ocr"
+        if not pages_text:
+            pages_text = ocr_pdf_with_tesseract(pdf_path, args.lang, args.dpi)
+
+        pages: List[PageResult] = []
+        for i, t in enumerate(pages_text, start=1):
+            ct = clean_text(t)
+            lines = [ln for ln in ct.splitlines() if ln.strip()]
+            pages.append(PageResult(page=i, text=ct, lines=lines))
+
+        if not args.structured_only:
+            meta = OCRResult(
+                source_file=os.path.abspath(pdf_path),
+                file_size_bytes=os.path.getsize(pdf_path),
+                file_md5=compute_md5(pdf_path),
+                created_at=dt.datetime.now().astimezone().isoformat(),
+                engine=engine,
+                num_pages=len(pages),
+                pages=pages,
+            )
+            with open(json_full, "w", encoding="utf-8") as f:
+                json.dump(asdict(meta), f, ensure_ascii=False, indent=2)
+            print(f"✅ Saved full JSON: {json_full}")
+
+        if not args.text_only:
+            structured = parse_structured_from_pages(pages)
+            structured = merge_company_title(structured, base_dir, base)
+
+            with open(json_struct, "w", encoding="utf-8") as f:
+                json.dump(structured, f, ensure_ascii=False, indent=2)
+            print(f"✅ Saved structured JSON: {json_struct}")
+
+        return True
+
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        print(f"❌ Error processing {pdf_path}: {e}", file=sys.stderr)
+        return False
+
+
+# ---------- discover files for batch ---------- #
+def discover_input_files(input_path: str, default_pattern: str = "*_company_info.pdf") -> List[str]:
+    # 1) ถ้าเป็นไฟล์ .pdf โดยตรง
+    if os.path.isfile(input_path) and input_path.lower().endswith(".pdf"):
+        return [input_path]
+
+    # 2) ถ้าเป็นโฟลเดอร์ → หาไฟล์ตาม default_pattern
+    if os.path.isdir(input_path):
+        return sorted(glob.glob(os.path.join(input_path, default_pattern)))
+
+    # 3) ไม่ใช่ไฟล์/โฟลเดอร์ → ถือว่าเป็น glob pattern เลย
+    matches = sorted(glob.glob(input_path))
+    # เผื่อ user ลืมใส่ *.pdf ให้กรองเฉพาะ .pdf
+    matches = [m for m in matches if m.lower().endswith(".pdf")]
+    return matches
+
+
 # ---------- main ---------- #
 def main():
-    ap = argparse.ArgumentParser(description="DBD OCR to structured JSON (table-aware v6).")
-    ap.add_argument("input_pdf")
+    ap = argparse.ArgumentParser(description="DBD OCR to structured JSON (table-aware v6, batch-enabled).")
+    ap.add_argument("input_path", help="ไฟล์เดี่ยว / โฟลเดอร์ / หรือ glob pattern เช่น 'downloads/*_company_info.pdf'")
     ap.add_argument("--lang", default="tha+eng")
     ap.add_argument("--dpi", type=int, default=300)
     ap.add_argument("--force-ocr", action="store_true")
     ap.add_argument("--structured-only", action="store_true")
     ap.add_argument("--text-only", action="store_true")
+    ap.add_argument("--pattern", default="*_company_info.pdf", help="pattern ที่ใช้เมื่อ input_path เป็นโฟลเดอร์ (ค่าเริ่มต้น: *_company_info.pdf)")
     args = ap.parse_args()
 
-    pdf_path = args.input_pdf
-    if not os.path.isfile(pdf_path):
-        print(f"❌ File not found: {pdf_path}", file=sys.stderr)
-        sys.exit(1)
+    files = discover_input_files(args.input_path, default_pattern=args.pattern)
+    if not files:
+        print(f"❌ No PDF matched. Input: {args.input_path}", file=sys.stderr)
+        sys.exit(2)
 
-    base_dir = os.path.dirname(pdf_path)
-    base = os.path.splitext(os.path.basename(pdf_path))[0]
-    json_full = os.path.join(base_dir, base + ".json")
-    json_struct = os.path.join(base_dir, base + "_structured.json")
+    print("============================================================")
+    print("Batch PDF → JSON (DBD company info)")
+    print("============================================================")
+    print(f"Found {len(files)} file(s).")
 
-    pages_text = [] if args.force_ocr else extract_text_pdfminer(pdf_path)
-    engine = "pdfminer" if pages_text else "tesseract-ocr"
-    if not pages_text:
-        pages_text = ocr_pdf_with_tesseract(pdf_path, args.lang, args.dpi)
+    ok, fail = 0, 0
+    for idx, fp in enumerate(files, start=1):
+        print(f"[{idx}/{len(files)}] Processing: {fp}")
+        if process_one(fp, args):
+            ok += 1
+        else:
+            fail += 1
 
-    pages: List[PageResult] = []
-    for i, t in enumerate(pages_text, start=1):
-        ct = clean_text(t)
-        lines = [ln for ln in ct.splitlines() if ln.strip()]
-        pages.append(PageResult(page=i, text=ct, lines=lines))
-
-    if not args.structured_only:
-        meta = OCRResult(
-            source_file=os.path.abspath(pdf_path),
-            file_size_bytes=os.path.getsize(pdf_path),
-            file_md5=compute_md5(pdf_path),
-            created_at=dt.datetime.now().astimezone().isoformat(),
-            engine=engine,
-            num_pages=len(pages),
-            pages=pages,
-        )
-        with open(json_full, "w", encoding="utf-8") as f:
-            json.dump(asdict(meta), f, ensure_ascii=False, indent=2)
-        print(f"Saved full JSON: {json_full}")
-
-    if not args.text_only:
-        structured = parse_structured_from_pages(pages)
-
-        # NEW: รวมข้อมูลจาก <juristic_id>_company_title.json ถ้ามี
-        structured = merge_company_title(structured, base_dir, base)
-
-        with open(json_struct, "w", encoding="utf-8") as f:
-            json.dump(structured, f, ensure_ascii=False, indent=2)
-        print(f"Saved structured JSON: {json_struct}")
+    print("------------------------------------------------------------")
+    print(f"Done. Success: {ok}, Failed: {fail}")
+    sys.exit(0 if fail == 0 else 1)
 
 
 if __name__ == "__main__":
