@@ -94,6 +94,7 @@ python script_read_dbd_ratios.py   --folder ./downloads   --outdir ./processed_d
 
 ## 🧩 ขั้นตอนที่ 6 — ส่งข้อมูลบริษัทเข้าสู่ระบบ API
 
+6.1 ส่งข้อมูลเอง
 คัดลอกเนื้อหาในไฟล์  
 `downloads/0105537086874_company_info_structured.json`  
 แล้ว POST ไปยัง API endpoint:
@@ -106,6 +107,18 @@ POST <URL>/api/public/dbd-company-supplier
 
 ```bash
 curl -X POST <URL>/api/public/dbd-company-supplier   -H "Content-Type: application/json"   -d @downloads/0105537086874_company_info_structured.json
+```
+
+6.2 ใช้ script python ส่ง api ให้แทน โดยจะต้องกำหนดที่อยู่ของไฟล์ และไฟล์จะต้องมีชื่อ <juristic-id>\_company_info_structured.json
+
+```
+python send_dbd_company_supplier.py downloads/0105541008416_company_info_structured.json
+```
+
+หรือ ระบุ folder เพื่อส่งข้อมูลทั้งหมด
+
+```
+python send_dbd_company_supplier.py downloads
 ```
 
 ---
