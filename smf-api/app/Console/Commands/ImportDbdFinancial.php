@@ -3,26 +3,21 @@
 namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use App\Models\CompanyBalanceSheet;
 use App\Models\CompanyIncomeStatement;
 use App\Models\CompanyFinancialRatios;
+use App\Models\CompanyEntity;
 
 class ImportDbdFinancial extends Command
 {
-    /**
-     * ใช้งาน:
-     *  php artisan dbd:import-financial            # สแกน storage/app ทั้งหมด
-     *  php artisan dbd:import-financial --tax_id=0105537086874
-     *  php artisan dbd:import-financial --dry
-     */
     protected $signature = 'dbd:import-financial
                             {--tax_id= : กรองเฉพาะเลขนิติบุคคล/ภาษี}
                             {--dry : ทดลองรัน ไม่เขียนฐานข้อมูล}';
 
     protected $description = 'Import DBD financial (balance, income, ratios) from storage/app/*_{balance|income|ratios}.json';
 
-    /** คอลัมน์ที่อนุญาตในแต่ละตาราง (wide) */
     private const BALANCE_COLS = [
         'accounts_receivable_net',
         'inventories',
@@ -68,14 +63,17 @@ class ImportDbdFinancial extends Command
         'debt_to_working_capital_ratio_times',
     ];
 
+    /** นับยอดที่ข้ามเพราะไม่มี parent */
+    private int $skippedNoParent = 0;
+
     public function handle(): int
     {
-        $filterTax = trim((string) $this->option('tax_id'));
-        $isDry     = (bool) $this->option('dry');
+        $filterTaxRaw = trim((string) $this->option('tax_id'));
+        $filterTax    = $filterTaxRaw !== '' ? $this->normTaxId($filterTaxRaw) : '';
+        $isDry        = (bool) $this->option('dry');
 
         $base = storage_path('app');
 
-        // หาไฟล์ทั้งหมดใน storage/app
         $patterns = [
             $base . DIRECTORY_SEPARATOR . '*_balance.json',
             $base . DIRECTORY_SEPARATOR . '*_income.json',
@@ -105,15 +103,14 @@ class ImportDbdFinancial extends Command
 
         foreach ($files as $path) {
             $file = basename($path); // ex: 0105537086874_balance.json
-            [$taxId, $type] = $this->parseFileName($file);
-
-            if (!$taxId || !$type) {
+            [$taxIdRawFromFile, $type] = $this->parseFileName($file);
+            if (!$taxIdRawFromFile || !$type) {
                 $this->warn("ข้ามไฟล์ (ชื่อไม่ตรงรูปแบบ): {$file}");
                 continue;
             }
-            if ($filterTax && $filterTax !== $taxId) {
-                continue;
-            }
+
+            $taxId = $this->normTaxId($taxIdRawFromFile);
+            if ($filterTax && $filterTax !== $taxId) continue;
 
             $json = File::get($path);
             $data = json_decode($json, true);
@@ -123,6 +120,13 @@ class ImportDbdFinancial extends Command
             }
 
             $this->line("ไฟล์: {$file}  [tax={$taxId}, type={$type}]");
+
+            // ✅ ไม่แตะต้อง company_entity: ถ้าไม่มี parent -> ข้ามทั้งไฟล์นี้
+            if (!$this->hasParent($taxId)) {
+                $this->warn("  ⚠ ข้าม: ไม่มี parent ใน company_entity.registered_no={$taxId}");
+                $this->skippedNoParent++;
+                continue;
+            }
 
             [$years, $cols] = $this->importByType($type, $taxId, $data, $isDry);
 
@@ -134,30 +138,40 @@ class ImportDbdFinancial extends Command
 
         $this->newLine();
         $this->info("สรุปทั้งหมด: ไฟล์={$totalFiles}, ปีรวม={$totalYears}, คอลัมน์รวม={$totalColumns}");
+        if ($this->skippedNoParent > 0) {
+            $this->warn("ข้ามเพราะไม่มี parent: {$this->skippedNoParent} ไฟล์");
+        }
         return self::SUCCESS;
     }
 
-    /** แยก tax_id กับชนิดไฟล์จากชื่อ */
+    /** -------- Utilities -------- */
+
+    private function normTaxId($v): string
+    {
+        $s = preg_replace('/\D+/', '', (string) $v);
+        if (strlen($s) > 13) $s = substr($s, -13);
+        return str_pad($s, 13, '0', STR_PAD_LEFT);
+    }
+
+    /** ตรวจว่ามี parent ใน company_entity หรือไม่ (ไม่สร้าง) */
+    private function hasParent(string $taxId): bool
+    {
+        // ใช้ Eloquent/QueryBuilder ก็ได้
+        return CompanyEntity::where('registered_no', $taxId)->exists();
+    }
+
     private function parseFileName(string $file): array
     {
-        // รูปแบบคาดหวัง: <tax>_balance.json | <tax>_income.json | <tax>_ratios.json
         if (!str_ends_with($file, '.json')) return [null, null];
-
-        $main = substr($file, 0, -5); // ตัด ".json"
+        $main = substr($file, 0, -5);
         $pos  = strrpos($main, '_');
         if ($pos === false) return [null, null];
-
         $tax  = substr($main, 0, $pos);
         $type = substr($main, $pos + 1);
-
         $type = in_array($type, ['balance', 'income', 'ratios'], true) ? $type : null;
         return [$tax ?: null, $type];
     }
 
-    /**
-     * import ตามชนิด
-     * @return array [yearsProcessed, colsSetTotal]
-     */
     private function importByType(string $type, string $taxId, array $byYearData, bool $isDry): array
     {
         return match ($type) {
@@ -179,11 +193,10 @@ class ImportDbdFinancial extends Command
             $payload = ['tax_id' => $taxId, 'fiscal_year' => $year];
             $cols = 0;
 
-            foreach ($rows as $i => $row) {
+            foreach ($rows as $row) {
                 if (!is_array($row)) continue;
                 $code   = $row['item_en'] ?? null;
                 $amount = $row['amount']  ?? null;
-
                 if ($code && in_array($code, self::BALANCE_COLS, true)) {
                     $payload[$code] = is_null($amount) ? null : (float) $amount;
                     $cols++;
@@ -194,7 +207,7 @@ class ImportDbdFinancial extends Command
                 $this->line("    DRY: BS upsert {$taxId} {$year} set {$cols} cols");
             } else {
                 CompanyBalanceSheet::updateOrCreate(
-                    ['tax_id' => $taxId, 'fiscal_year' => $year],
+                    ['registered_no' => $taxId, 'fiscal_year' => $year],
                     $payload
                 );
             }
@@ -215,11 +228,10 @@ class ImportDbdFinancial extends Command
             $payload = ['tax_id' => $taxId, 'fiscal_year' => $year];
             $cols = 0;
 
-            foreach ($rows as $i => $row) {
+            foreach ($rows as $row) {
                 if (!is_array($row)) continue;
                 $code   = $row['item_en'] ?? null;
                 $amount = $row['amount']  ?? null;
-
                 if ($code && in_array($code, self::INCOME_COLS, true)) {
                     $payload[$code] = is_null($amount) ? null : (float) $amount;
                     $cols++;
@@ -230,7 +242,7 @@ class ImportDbdFinancial extends Command
                 $this->line("    DRY: IS upsert {$taxId} {$year} set {$cols} cols");
             } else {
                 CompanyIncomeStatement::updateOrCreate(
-                    ['tax_id' => $taxId, 'fiscal_year' => $year],
+                    ['registered_no' => $taxId, 'fiscal_year' => $year],
                     $payload
                 );
             }
@@ -251,11 +263,10 @@ class ImportDbdFinancial extends Command
             $payload = ['tax_id' => $taxId, 'fiscal_year' => $year];
             $cols = 0;
 
-            foreach ($rows as $i => $row) {
+            foreach ($rows as $row) {
                 if (!is_array($row)) continue;
                 $code   = $row['item_en'] ?? null;
                 $amount = $row['amount']  ?? null;
-
                 if ($code && in_array($code, self::RATIOS_COLS, true)) {
                     $payload[$code] = is_null($amount) ? null : (float) $amount;
                     $cols++;
@@ -266,7 +277,7 @@ class ImportDbdFinancial extends Command
                 $this->line("    DRY: RT upsert {$taxId} {$year} set {$cols} cols");
             } else {
                 CompanyFinancialRatios::updateOrCreate(
-                    ['tax_id' => $taxId, 'fiscal_year' => $year],
+                    ['registered_no' => $taxId, 'fiscal_year' => $year],
                     $payload
                 );
             }
