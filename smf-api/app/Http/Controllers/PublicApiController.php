@@ -576,6 +576,7 @@ class PublicApiController extends Controller
                 'title_card' => ['nullable', 'array'],
                 'title_card.entity_status' => ['nullable', 'string'],
                 'title_card.business_size' => ['nullable', 'string', 'max:5'],
+                'title_card.business_group' => ['nullable', 'string'],
             ]);
 
             // 2) Map → company_entity
@@ -672,6 +673,7 @@ class PublicApiController extends Controller
             'entity_type_code'                   => isset($src['entity_type']) ? trim($src['entity_type']) : null,
             'registration_date'                  => $src['registered_date'] ?? ($src['incorporation_date_th'] ?? null),
 
+            'business_group'                     => $src['title_card']['business_group'] ?? null,
             'company_status'                     => $status,
             'company_size'                       => $src['title_card']['business_size'] ?? null,
 
