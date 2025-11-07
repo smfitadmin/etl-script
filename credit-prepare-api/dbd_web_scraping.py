@@ -6,6 +6,7 @@
 # - ดาวน์โหลดงบการเงิน 3 รายงาน (balance, income, ratios)
 # - ดึงข้อมูลจากการ์ด "ข้อมูลนิติบุคคล" เป็น <juristic_id>_company_title.json
 # - รองรับหลายรหัส โดยใช้ช่องค้นหาเดิม (#textSearch/#searchicon) ไม่โหลดหน้าใหม่
+# - เมื่อเข้าแท็บ "ข้อมูลงบการเงิน" แล้วพบ <h3>ไม่พบข้อมูล</h3> ให้บันทึก JSON และข้ามการดาวน์โหลด
 # ============================================================
 
 import argparse
@@ -323,57 +324,86 @@ def download_company_info_pdf(driver, juristic_id: str, out_dir: Path) -> Path:
     return pdf_file
 
 
-def go_financial_tab(driver):
+def go_financial_tab(driver, out_dir: Path) -> str:
+    """
+    เปิดแท็บ 'ข้อมูลงบการเงิน' แล้วรอหนึ่งในสองสภาวะ:
+      1) พบเมนูรายงาน (.finMenu) -> คืนค่า 'menu'
+      2) พบข้อความ 'ไม่พบข้อมูล' ใน card-infos -> คืนค่า 'empty'
+    ถ้าไม่เจอทั้งคู่ภายในเวลา -> error
+    """
     print("กำลังเปิดแท็บข้อมูลงบการเงิน...")
     try_close_popups(driver)
-    time.sleep(1.0)
+    time.sleep(0.8)
 
-    # scroll เพื่อให้แท็บโผล่
+    # scroll ให้แท็บโผล่
     driver.execute_script("window.scrollTo(0, 600);")
-    time.sleep(1.0)
+    time.sleep(0.8)
 
+    # ลองคลิกเข้า "งบการเงิน"
     patterns = [
-        "//a[contains(.,'งบการเงิน') and not(contains(@href,'#'))]",
         "//a[contains(@href,'#tab22') or contains(@href,'#tab_financial')]",
+        "//a[contains(.,'งบการเงิน') and not(contains(@href,'#'))]",
         "//button[contains(.,'งบการเงิน')]",
         "//li[contains(@class,'dropdown')]//*[contains(.,'งบการเงิน')]",
         "//*[contains(text(),'งบการเงิน') and (self::a or self::span or self::div)]"
     ]
-
-    found = False
     for xp in patterns:
         try:
             els = driver.find_elements(By.XPATH, xp)
             for el in els:
                 if el.is_displayed():
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                    time.sleep(0.5)
+                    time.sleep(0.3)
                     try:
                         el.click()
                     except Exception:
                         driver.execute_script("arguments[0].click();", el)
-                    time.sleep(2.5)
-                    found = True
+                    time.sleep(1.2)
                     break
-            if found:
-                break
         except Exception:
             continue
 
-    if not found:
-        save_debug(driver, "financial_tab_not_found", Path("./downloads"))
-        raise RuntimeError("ไม่พบแท็บ 'งบการเงิน'")
+    # รอเงื่อนไขอย่างใดอย่างหนึ่งเกิดขึ้น
+    deadline = time.time() + 20  # วินาที
+    found_menu = False
+    found_empty = False
 
-    # รอปุ่ม finMenu ปรากฏ
-    try:
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".finMenu"))
-        )
-        time.sleep(2.5)
-        print("เนื้อหางบการเงินโหลดสำเร็จ")
-    except Exception:
-        save_debug(driver, "financial_content_not_loaded", Path("./downloads"))
-        raise RuntimeError("แท็บงบการเงินเปิดแล้ว แต่เนื้อหาไม่โหลด")
+    while time.time() < deadline:
+        try_close_popups(driver, loops=1)
+
+        # เงื่อนไข 1: มีเมนูรายงาน (.finMenu)
+        try:
+            menus = driver.find_elements(By.CSS_SELECTOR, ".finMenu")
+            if any(m.is_displayed() for m in menus):
+                found_menu = True
+        except Exception:
+            pass
+
+        # เงื่อนไข 2: มีแถบข้อความไม่พบข้อมูล ใน card-infos ของงบการเงิน
+        try:
+            empties = driver.find_elements(
+                By.XPATH,
+                "//div[contains(@class,'card-infos')]//h3[normalize-space()='ไม่พบข้อมูล']"
+            )
+            if any(e.is_displayed() for e in empties):
+                found_empty = True
+        except Exception:
+            pass
+
+        if found_menu or found_empty:
+            break
+        time.sleep(0.5)
+
+    if found_menu:
+        print("เนื้อหางบการเงินโหลดสำเร็จ (มี .finMenu)")
+        return "menu"
+
+    if found_empty:
+        print("งบการเงิน: ไม่พบข้อมูล (พบ <h3>ไม่พบข้อมูล</h3>)")
+        return "empty"
+
+    save_debug(driver, "financial_content_timeout", out_dir)
+    raise RuntimeError("แท็บงบการเงินเปิดแล้ว แต่ไม่พบทั้งเมนูและ 'ไม่พบข้อมูล'")
 
 
 def switch_report(driver, lang_key: str):
@@ -447,6 +477,27 @@ def parse_ids(args) -> List[str]:
     raise SystemExit("ต้องระบุ --juristic-id หรือ --juristic-ids หรือ --ids-file")
 
 
+def write_fs_not_found(out_dir: Path, juristic_id: str) -> Path:
+    # เตรียมข้อมูล JSON
+    data = {"juristic_id": juristic_id, "result_fs": "not found"}
+
+    # path ของโฟลเดอร์ not_found และสร้างถ้ายังไม่มี
+    nf_dir = out_dir / "not_found"
+    nf_dir.mkdir(parents=True, exist_ok=True)
+
+    # path ของไฟล์ JSON
+    json_path = nf_dir / f"{juristic_id}_financial_result.json"
+    json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # path ของไฟล์ list.txt และบันทึก juristic_id ต่อท้าย
+    txt_path = nf_dir / "not_found_list.txt"
+    with open(txt_path, "a", encoding="utf-8") as f:
+        f.write(f"{juristic_id}\n")
+
+    print(f"บันทึกสถานะงบการเงิน (ไม่พบข้อมูล): {json_path}")
+    print(f"เพิ่มรายชื่อใน not_found_list.txt: {juristic_id}")
+    return json_path
+
 def run_for_one_company(driver, out_dir: Path, juristic_id: str):
     try:
         scrape_company_title_card(driver, out_dir, juristic_id)
@@ -454,7 +505,17 @@ def run_for_one_company(driver, out_dir: Path, juristic_id: str):
         print(f"[warn] company_title.json: {e}")
 
     download_company_info_pdf(driver, juristic_id, out_dir)
-    go_financial_tab(driver)
+
+    # เข้าหน้าข้อมูลงบการเงิน แล้วตัดสินใจว่าจะดาวน์โหลดหรือบันทึก not found
+    state = go_financial_tab(driver, out_dir)
+    if state == "empty":
+        write_fs_not_found(out_dir, juristic_id)
+        print("-" * 60)
+        print(f"เสร็จสมบูรณ์ (ไม่มีงบการเงิน): {juristic_id}")
+        print("-" * 60)
+        return
+
+    # มีเมนูรายงาน -> ดาวน์โหลด XLS ทั้งสาม
     download_reports(driver, out_dir, juristic_id)
 
     print("-" * 60)
@@ -489,10 +550,8 @@ def main():
 
         # ตัวถัดไป: ใช้ input เดิม ไม่ต้องเข้าเว็บใหม่
         for jid in ids[1:]:
-            # กลับไปบนสุดเพื่อให้เห็นช่องค้นหา
             driver.execute_script("window.scrollTo(0, 0);")
             time.sleep(0.3)
-
             search_via_header_input(driver, jid, out_dir)
             run_for_one_company(driver, out_dir, jid)
 

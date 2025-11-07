@@ -53,7 +53,7 @@ def _norm_text(s: str) -> str:
 def extract_buyer_from_b3(raw_df: pd.DataFrame) -> Dict[str, Any]:
     buyer_text: Optional[str] = None
     try:
-        buyer_text = str(raw_df.iat[2, 1]).strip()  # B3 -> [2,1]
+        buyer_text = str(raw_df.iat[1, 1]).strip()  # B3 -> [2,1], B2 -> [1, 1]
     except Exception:
         pass
 
