@@ -541,7 +541,6 @@ class PublicApiController extends Controller
         try {
             // 1) Validate ให้สอดคล้องกับ body ล่าสุด
             $data = $request->validate([
-                'company_name' => ['required', 'string', 'max:255'],
                 'registration_number' => ['required', 'string', 'max:32'],
                 'entity_type' => ['nullable', 'string', 'max:100'],
 
@@ -574,6 +573,7 @@ class PublicApiController extends Controller
                 'directors.*.name' => ['required_with:directors', 'string', 'max:255'],
 
                 'title_card' => ['nullable', 'array'],
+                'title_card.company_name' => ['nullable', 'string'],
                 'title_card.entity_status' => ['nullable', 'string'],
                 'title_card.business_size' => ['nullable', 'string', 'max:5'],
                 'title_card.business_group' => ['nullable', 'string'],
@@ -666,10 +666,17 @@ class PublicApiController extends Controller
             $status = null;
         }
 
+        $companyName = null;
+        if (!empty($src['title_card']['company_name'])) {
+            $companyName = trim($src['title_card']['company_name']);
+        } elseif (!empty(trim($src['company_name']))) {
+            $companyName = trim($src['company_name']);
+        }
+
         return [
             'registered_no'                      => trim($src['registration_number']),
             'company_name_en'                    => null,
-            'company_name_th'                    => trim($src['company_name']),
+            'company_name_th'                    => $companyName,
             'entity_type_code'                   => isset($src['entity_type']) ? trim($src['entity_type']) : null,
             'registration_date'                  => $src['registered_date'] ?? ($src['incorporation_date_th'] ?? null),
 
@@ -885,9 +892,9 @@ class PublicApiController extends Controller
         $from = $request->integer('from');
         $to   = $request->integer('to');
 
-        $bsQ = \App\Models\CompanyBalanceSheet::where('tax_id', $taxId);
-        $isQ = \App\Models\CompanyIncomeStatement::where('tax_id', $taxId);
-        $rtQ = \App\Models\CompanyFinancialRatios::where('tax_id', $taxId);
+        $bsQ = CompanyBalanceSheet::where('tax_id', $taxId);
+        $isQ = CompanyIncomeStatement::where('tax_id', $taxId);
+        $rtQ = CompanyFinancialRatios::where('tax_id', $taxId);
 
         if ($from) {
             $bsQ->where('fiscal_year', '>=', $from);
