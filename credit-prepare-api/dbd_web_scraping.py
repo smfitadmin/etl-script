@@ -14,6 +14,7 @@ import time
 import json
 from pathlib import Path
 from typing import List, Optional
+import re
 
 from selenium import webdriver
 from selenium.webdriver import ChromeOptions
@@ -186,8 +187,10 @@ def search_via_header_input(driver, juristic_id: str, out_dir: Path):
 def scrape_company_title_card(driver, out_dir: Path, juristic_id: str) -> Path:
     """
     หา card 'ข้อมูลนิติบุคคล' แล้วดึงคู่ label/value ภายใน .row
+    + ดึง company_name / registration_no จาก .cac-certified
     คืน path ของไฟล์ JSON ที่บันทึก
     """
+    
     try_close_popups(driver)
     # เลื่อนให้เห็นการ์ด
     try:
@@ -200,11 +203,43 @@ def scrape_company_title_card(driver, out_dir: Path, juristic_id: str) -> Path:
         save_debug(driver, "company_title_not_found", out_dir)
         raise RuntimeError("ไม่พบการ์ด 'ข้อมูลนิติบุคคล'")
 
-    card = driver.find_element(By.XPATH, "//h5[contains(@class,'card-title')][contains(.,'ข้อมูลนิติบุคคล')]/ancestor::div[contains(@class,'card-infos')]")
-    rows = card.find_elements(By.CSS_SELECTOR, ".card-body .row .col-6")
-
     def norm_txt(s: str) -> str:
         return " ".join((s or "").replace("\xa0", " ").split()).strip()
+
+    # ---------- ดึงจาก .cac-certified (ชื่อบริษัท + เลขทะเบียน) ----------
+    company_name = None
+    registration_no = None
+    try:
+        cac = driver.find_element(By.CSS_SELECTOR, ".cac-certified")
+        try:
+            h3 = cac.find_element(By.CSS_SELECTOR, "h3")
+            name_txt = norm_txt(h3.text)
+            # ตัด prefix "ชื่อนิติบุคคล :" (เผื่อมีสเปซ/โคลอนหลายแบบ)
+            company_name = re.sub(r"^\s*ชื่อนิติบุคคล\s*[:：]\s*", "", name_txt)
+            company_name = company_name or None
+        except Exception:
+            pass
+
+        try:
+            h4 = cac.find_element(By.CSS_SELECTOR, "h4")
+            reg_txt = norm_txt(h4.text)
+            # ตัด prefix
+            reg_txt = re.sub(r"^\s*เลขทะเบียนนิติบุคคล\s*[:：]\s*", "", reg_txt)
+            # เก็บเฉพาะเลข (รองรับมีขีด/ช่องว่าง)
+            m = re.search(r"(\d{10,20})", re.sub(r"[^\d]", "", reg_txt))
+            if m:
+                registration_no = m.group(1)
+        except Exception:
+            pass
+    except Exception:
+        # ไม่มีบล็อก .cac-certified ก็ข้ามได้
+        pass
+
+    card = driver.find_element(
+        By.XPATH,
+        "//h5[contains(@class,'card-title')][contains(.,'ข้อมูลนิติบุคคล')]/ancestor::div[contains(@class,'card-infos')]"
+    )
+    rows = card.find_elements(By.CSS_SELECTOR, ".card-body .row .col-6")
 
     MONTHS_TH = {
         "ม.ค.": 1, "ก.พ.": 2, "มี.ค.": 3, "เม.ย.": 4, "พ.ค.": 5, "มิ.ย.": 6,
@@ -228,6 +263,8 @@ def scrape_company_title_card(driver, out_dir: Path, juristic_id: str) -> Path:
             return None
 
     data = {
+        "company_name": company_name,          
+        "registration_no": registration_no,    
         "entity_type": None,
         "entity_status": None,
         "incorporation_date_th_text": None,
@@ -285,6 +322,7 @@ def scrape_company_title_card(driver, out_dir: Path, juristic_id: str) -> Path:
     out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"บันทึก Company Title JSON: {out_path.name}")
     return out_path
+
 
 
 def download_company_info_pdf(driver, juristic_id: str, out_dir: Path) -> Path:
