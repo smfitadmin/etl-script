@@ -82,12 +82,12 @@ php artisan invoice-report:import storage/app/invoice_detail_report_20251003_205
 ---
 
 ## 5) รัน Laravel ด้วย Docker
-
+ตัวอย่าง
 ### docker-compose.yml
 ```yaml
 version: "3.8"
 services:
-  laravel:
+  app:
     build:
       context: ./be
       dockerfile: Dockerfile
