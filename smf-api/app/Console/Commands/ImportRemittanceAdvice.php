@@ -5,7 +5,7 @@ namespace App\Console\Commands;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
-class ImportRemAdvice extends Command
+class ImportRemittanceAdvice extends Command
 {
     protected $signature = 'rem-advice:import
                             {file : JSON path เช่น storage/app/72195.json หรือ 72195.json}';

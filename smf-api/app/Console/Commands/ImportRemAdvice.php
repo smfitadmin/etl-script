@@ -12,7 +12,7 @@ use Carbon\Carbon;
 
 class ImportRemAdvice extends Command
 {
-    protected $signature = 'rm-report:import
+    protected $signature = 'remittance-report:import
         {path : Path to JSON file}
         {--table=rm_detail_report : DB table name}
         {--connection= : DB connection name (override default)}
@@ -65,8 +65,8 @@ class ImportRemAdvice extends Command
 
         // map คีย์ภาษาไทย -> คอลัมน์ DB
         $thaiToDb = [
-            'วันที่'               => 'report_date',
-            'วันที่เอกสาร'         => 'invoice_date',
+            'วันที่'               => 'invoice_date',
+            'วันที่เอกสาร'         => 'report_date',
             'วันที่จ่ายเงิน'       => 'payment_date',
             'รหัสผู้ขาย'           => 'supplier_code',
             'รหัสสาขา'             => 'branch_code',
