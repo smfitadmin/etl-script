@@ -162,11 +162,38 @@ def normalize_branch(tok: str) -> str:
 
 
 def normalize_docref_token(tok: str) -> str:
-    if not tok: return tok
-    t = _fix_ocr_o0i1(tok).strip()
+    """
+    ปรับ token ที่เป็นเลขที่เอกสาร / เอกสารอ้างอิง
+    - มี SPECIAL RULE สำหรับคำว่า CONSIGN / CONSIGN-00 ที่โดน OCR เพี้ยนเป็น C0NS1GN / C0NS1GN-00
+    - กรณีอื่น ๆ ใช้กติกาเดิม: O->0, I->1 และ 1V -> IV
+    """
+    if not tok:
+        return tok
+
+    raw = str(tok).strip()
+
+    # --- SPECIAL RULE สำหรับ CONSIGN / CONSIGN-XX ---
+    # OCR มักอ่าน CONSIGN -> C0NS1GN หรือ CONS1GN-00 ฯลฯ
+    # pattern นี้ครอบคลุม:
+    #   CONSIGN
+    #   C0NS1GN
+    #   CONSIGN-00 / C0NS1GN-00 / CONS1GN00 etc.
+    m = re.match(r"^C[O0]NS[1I]GN(?:[-]?\d\d)?$", raw, re.IGNORECASE)
+    if m:
+        # ถ้ามีเลขท้าย (เช่น -00 / 00)
+        num = re.findall(r"\d\d$", raw)
+        if num:
+            return f"CONSIGN-{num[0]}"
+        return "CONSIGN"
+
+    # --- DEFAULT normalizer เดิม ---
+    t = _fix_ocr_o0i1(raw).strip()
     u = t.upper()
-    if re.match(r'^1V', u):  # 1V0001775 -> IV0001775
+
+    # กรณี 1V -> IV
+    if re.match(r'^1V', u):
         t = 'I' + t[1:]
+
     return t
 
 # เลือก token ที่ “น่าใช่ที่สุด” จากสตริงมั่ว ๆ เช่น "เน?NV68071"

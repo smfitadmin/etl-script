@@ -4,7 +4,7 @@
 """
 read_po_csv_to_json.py
 
-- อ่าน CSV จาก raw_data/po/<file>.csv
+- อ่าน CSV/XLSX จาก raw_data/po/<file>.csv|.xlsx|.xls
 - Header หลัก: แถว 5 (index 4), ข้อมูล: แถว 6 (index 5)
 - ดึง Buyer จาก B3 (0-based: [2,1])
 - ดึงวันที่หัวรายงาน:
@@ -15,7 +15,8 @@ read_po_csv_to_json.py
 - โครงสร้าง JSON ต่อแถว:
   {
     "PO No.", "Buyer Code", "Buyer Name", "Supplier Code", "Supplier Name",
-    "Order Date", "Send Date", "Delivery Date", "PO Report Date", "PO Received Date",
+    "Order Date", "Send Date", "Delivery Date",
+    "PO Received From Date", "PO Received To Date",
     "Amount (PO Include VAT)", "Status"
   }
 - ฟอร์แมตวัน:
@@ -42,8 +43,24 @@ def read_csv_any_encoding(path: Path) -> pd.DataFrame:
             continue
     raise RuntimeError(f"Cannot read CSV with known encodings: {path}")
 
+
+def read_table_any(path: Path) -> pd.DataFrame:
+    """
+    อ่านไฟล์ตารางทั้ง .csv และ .xlsx/.xls โดยไม่แก้ไขเนื้อหาไฟล์ต้นฉบับ
+    """
+    suffix = path.suffix.lower()
+    if suffix in [".csv", ".txt"]:
+        return read_csv_any_encoding(path)
+    elif suffix in [".xlsx", ".xls"]:
+        # Excel ไม่มีเรื่อง encoding ในไฟล์แบบ text ใช้ read_excel ได้ตรง ๆ
+        return pd.read_excel(path, header=None, dtype=str)
+    else:
+        raise RuntimeError(f"Unsupported file type: {path}")
+
+
 def _strip_all(df: pd.DataFrame) -> pd.DataFrame:
     return df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+
 
 def _norm_text(s: str) -> str:
     return re.sub(r"\s+", " ", s.replace("\n", " ")).strip()
@@ -84,6 +101,7 @@ def extract_buyer_from_b3(raw_df: pd.DataFrame) -> Dict[str, Any]:
 # ---------- Date parsers ----------
 DATE_TOKEN_MDYYYY = re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})")  # m/d/yyyy or m-d-yyyy
 
+
 def parse_date_ddmmyyyy_to_iso(d: Optional[str]) -> Optional[str]:
     if not d or pd.isna(d) or str(d).strip() == "":
         return None
@@ -91,6 +109,7 @@ def parse_date_ddmmyyyy_to_iso(d: Optional[str]) -> Optional[str]:
     if pd.isna(ts):
         return None
     return ts.strftime("%Y-%m-%d")
+
 
 def parse_date_mmddyyyy_to_iso(d: Optional[str]) -> Optional[str]:
     """month-first -> YYYY-MM-DD"""
@@ -109,6 +128,7 @@ def parse_date_mmddyyyy_to_iso(d: Optional[str]) -> Optional[str]:
         return None
     return ts.strftime("%Y-%m-%d")
 
+
 def parse_send_datetime_to_iso(dt: Optional[str]) -> Optional[str]:
     if not dt or pd.isna(dt) or str(dt).strip() == "":
         return None
@@ -116,7 +136,7 @@ def parse_send_datetime_to_iso(dt: Optional[str]) -> Optional[str]:
     # รองรับ "m/d/yyyy HH:MM:SS AM/PM" และเคส "14:44:07 PM"
     m = re.search(
         r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})(?:\s*([AaPp][Mm]))?",
-        s
+        s,
     )
     if not m:
         ts = pd.to_datetime(s, errors="coerce")  # ปล่อยให้ pandas เดา
@@ -194,8 +214,14 @@ def build_data_df(raw_df: pd.DataFrame) -> pd.DataFrame:
 
     # บางรายงานมีหัวคอลัมน์ซ้ำในแถวข้อมูลแรก → ตรวจแล้วรีฉลาก
     expected_labels = {
-        "PO No.", "Supplier Code", "Supplier Name", "Order Date",
-        "Send Date", "Delivery Date", "Amount (PO Include VAT)", "Status"
+        "PO No.",
+        "Supplier Code",
+        "Supplier Name",
+        "Order Date",
+        "Send Date",
+        "Delivery Date",
+        "Amount (PO Include VAT)",
+        "Status",
     }
     if not df.empty:
         first = {c: _norm_text(str(df.iloc[0][c])) for c in df.columns}
@@ -216,11 +242,14 @@ def build_data_df(raw_df: pd.DataFrame) -> pd.DataFrame:
 TOTAL_PAT = re.compile(r"\b(total|grand\s*total|sub\s*total)\b", re.IGNORECASE)
 THAI_TOTAL_SUBSTRS = ("รวมทั้งสิ้น", "ยอดรวม", "รวม")
 
+
 def _is_empty_value(v: Any) -> bool:
     return (v is None) or (isinstance(v, float) and pd.isna(v)) or (isinstance(v, str) and v.strip() == "")
 
+
 def _row_is_empty(row: pd.Series) -> bool:
     return all(_is_empty_value(v) for v in row.values)
+
 
 def _row_has_total_keyword(row: pd.Series) -> bool:
     for v in row.values:
@@ -232,6 +261,7 @@ def _row_has_total_keyword(row: pd.Series) -> bool:
             if any(substr in low for substr in THAI_TOTAL_SUBSTRS):
                 return True
     return False
+
 
 def drop_trailing_totals_or_empty(df: pd.DataFrame) -> pd.DataFrame:
     """ลบเฉพาะแถวท้ายที่เป็นว่างหรือมีคำว่า total/grand total/subtotal/รวม/ยอดรวม/รวมทั้งสิ้น ต่อเนื่องจากท้ายตาราง"""
@@ -257,14 +287,15 @@ def row_to_output(row: pd.Series, buyer: Dict[str, Any], header_dates: Dict[str,
         "Buyer Name": buyer.get("Buyer Name"),
         "Supplier Code": row.get("Supplier Code"),
         "Supplier Name": row.get("Supplier Name"),
-        "Order Date": parse_date_ddmmyyyy_to_iso(row.get("Order Date")),          # dd/mm/yyyy -> iso
-        "Send Date": parse_send_datetime_to_iso(row.get("Send Date")),            # keep key even if None
-        "Delivery Date": parse_date_ddmmyyyy_to_iso(row.get("Delivery Date")),    # dd/mm/yyyy -> iso
-        "PO Received From Date": header_dates.get("PO Received From Date"),                     # from D4 (mm/dd/yyyy)
-        "PO Received To Date": header_dates.get("PO Received To Date"),                 # from F4 (mm/dd/yyyy)
+        "Order Date": parse_date_ddmmyyyy_to_iso(row.get("Order Date")),       # dd/mm/yyyy -> iso
+        "Send Date": parse_send_datetime_to_iso(row.get("Send Date")),         # keep key even if None
+        "Delivery Date": parse_date_ddmmyyyy_to_iso(row.get("Delivery Date")), # dd/mm/yyyy -> iso
+        "PO Received From Date": header_dates.get("PO Received From Date"),    # from D4 (mm/dd/yyyy)
+        "PO Received To Date": header_dates.get("PO Received To Date"),        # from F4 (mm/dd/yyyy)
         "Amount (PO Include VAT)": _parse_amount(row.get("Amount (PO Include VAT)")),
         "Status": row.get("Status"),
     }
+
 
 def _parse_amount(s: Optional[str]) -> Optional[float]:
     if s is None or pd.isna(s):
@@ -280,16 +311,16 @@ def _parse_amount(s: Optional[str]) -> Optional[float]:
 
 
 # ---------- Convert one file ----------
-def convert_one(csv_path: Path) -> Path:
-    raw = read_csv_any_encoding(csv_path)
+def convert_one(path: Path) -> Path:
+    raw = read_table_any(path)
     buyer = extract_buyer_from_b3(raw)
 
     # Header dates (month-first)
     po_report_date = extract_mmddyyyy_from_cell(raw, 3, 3)   # D4
     po_received_date = extract_mmddyyyy_from_cell(raw, 3, 5) # F4
     header_dates = {
-        "PO Received From Date": po_report_date,         # None if missing/unparseable
-        "PO Received To Date": po_received_date,     # None if missing/unparseable
+        "PO Received From Date": po_report_date,   # None if missing/unparseable
+        "PO Received To Date": po_received_date,   # None if missing/unparseable
     }
 
     df = build_data_df(raw)
@@ -299,7 +330,7 @@ def convert_one(csv_path: Path) -> Path:
 
     out_dir = Path("processed_data/po")
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / csv_path.with_suffix(".json").name
+    out_path = out_dir / path.with_suffix(".json").name
 
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
@@ -309,13 +340,22 @@ def convert_one(csv_path: Path) -> Path:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Convert PO CSV to JSON (buyer B3, D4/F4 dates m/d/yyyy, strict formats, tail-trim totals/empty).")
-    ap.add_argument("--csv", required=True, help='e.g. raw_data/po/po_detail_report_20251007_2050363.csv')
+    ap = argparse.ArgumentParser(
+        description=(
+            "Convert PO CSV/XLSX to JSON (buyer B3, D4/F4 dates m/d/yyyy, "
+            "strict formats, tail-trim totals/empty)."
+        )
+    )
+    ap.add_argument(
+        "--file",
+        required=True,
+        help="e.g. raw_data/po/po_detail_report_20251007_2050363.csv | .xlsx | .xls",
+    )
     args = ap.parse_args()
 
-    src = Path(args.csv)
+    src = Path(args.file)
     if not src.exists():
-        raise FileNotFoundError(f"CSV not found: {src}")
+        raise FileNotFoundError(f"File not found: {src}")
 
     convert_one(src)
 
